@@ -15,12 +15,13 @@ Calibración XYZ al estilo de la **Prusa MK3** para **Klipper**: el sensor PINDA
 5. [Mantenerlo actualizado](#mantenerlo-actualizado)
 6. [Seguridad](#seguridad)
 7. [Configuración](#configuración)
-8. [Puesta en marcha paso a paso](#puesta-en-marcha-paso-a-paso)
-9. [Referencia de comandos](#referencia-de-comandos)
-10. [Cómo funciona y diferencias con Prusa](#cómo-funciona-y-diferencias-con-prusa)
-11. [Pruebas offline](#pruebas-offline)
-12. [Solución de problemas](#solución-de-problemas)
-13. [Licencia y créditos](#licencia-y-créditos)
+8. [Ajuste básico paso a paso](#ajuste-básico-paso-a-paso)
+9. [Ejemplos de uso](#ejemplos-de-uso)
+10. [Referencia de comandos](#referencia-de-comandos)
+11. [Cómo funciona y diferencias con Prusa](#cómo-funciona-y-diferencias-con-prusa)
+12. [Pruebas offline](#pruebas-offline)
+13. [Solución de problemas](#solución-de-problemas)
+14. [Licencia y créditos](#licencia-y-créditos)
 
 ## Qué incluye
 
@@ -165,14 +166,203 @@ points:
 
 Con lámina, homear en el círculo en vez del centro puede mover el cero unas décimas: revisa la primera capa o repite `PROBE_CALIBRATE`. Hay ejemplos en `config/macros_ejemplo.cfg`.
 
-## Puesta en marcha paso a paso
+## Ajuste básico paso a paso
 
-1. `G28`
-2. `XYZCAL_GOTO POINT=1` (y luego 2, 3 y 4). Comprueba a ojo que el **PINDA** (no la boquilla) queda sobre el círculo. Un error de pocos mm lo corrige la búsqueda gruesa; más de ~4 mm hay que ajustar `first_point_x/y`.
-3. `XYZCAL_ZTEST POINT=1` baja hasta el primer contacto y dice a qué Z se activa. Con `G28` sobre el círculo debe dar una Z cercana a tu `z_offset`. Si no se activa, repite con `Z_FLOOR=1.0`, `0.5`, `0.0`, `-0.4`, vigilando. Tu `z_floor` definitivo debe quedar unas décimas por debajo de la Z de activación.
-4. `XYZCAL_POINT POINT=1` mide un círculo completo. Debe dar una dispersión de pocas centésimas de mm; repítelo y comprueba que el resultado se repite.
-5. `XYZCAL_CALIBRATE` mide los 4 círculos (unos minutos) e imprime el informe sin cambiar nada. Usa `COARSE=0` si la posición nominal ya es buena.
-6. Si el informe es razonable: `XYZCAL_APPLY SAVE=pinda_skew` y después `SAVE_CONFIG`.
+Guía para usar **todas** las opciones del programa, en el orden recomendado. Las partes 1 y 2 se hacen **con la lámina puesta**, la 3 **sin lámina** y la 4 vuelve a ponerla. Tiempos orientativos (los de `CALIBRATE` y `LOCATE` son de una MK3 real; los demás son estimaciones): `CALIBRATE` ~8 min, `LOCATE REPEAT=3` ~18 min, `MAGNETS` ~15-20 min.
+
+### Parte 1: comprobar que el módulo carga (lámina puesta)
+
+1. Reinicia Klipper y escribe en la consola:
+   ```gcode
+   XYZCAL_GOTO
+   ```
+   Debe responder `missing POINT`. Si dice `Unknown command`, el módulo no cargó (ver [Solución de problemas](#solución-de-problemas)).
+2. Con la mano en el paro de emergencia, haz el primer homing completo. Con la lámina puesta el PINDA dispara en cualquier sitio, así que solo compruebas el movimiento:
+   ```gcode
+   G28
+   GET_POSITION
+   ```
+   Tras el `G28`, Z debe valer el `z_hop` de `[safe_z_home]` (15 si usas el ejemplo).
+
+### Parte 2: mapa de imanes y límites (lámina puesta, cama fría)
+
+3. **Límites de X/Y** (opcional; es un choque mecánico en el tope máximo, empieza corto):
+   ```gcode
+   G28
+   XYZCAL_LIMITS AXES=X OVERRUN=5
+   XYZCAL_LIMITS AXES=Y OVERRUN=5
+   ```
+   Si los resultados cuadran, repite los dos ejes de una vez con `XYZCAL_LIMITS AXES=XY REPEAT=3`. Si el tope físico queda antes que tu `position_max`, baja el `position_max` al valor sugerido.
+4. **`faulty_region` de `[bed_mesh]`:**
+   ```gcode
+   G28
+   XYZCAL_MAGNETS STEP=8 CSV=/home/pi/printer_data/config/imanes.csv
+   ```
+   Copia el bloque `faulty_region_N_min/max` de la salida a `[bed_mesh]` (borrando antes las regiones antiguas), haz `FIRMWARE_RESTART` y comprueba:
+   ```gcode
+   G28
+   BED_MESH_CALIBRATE
+   BED_MESH_OUTPUT PGP=1
+   ```
+   En la salida deben aparecer los puntos «faulty region». Si el mapa marcó demasiado o no vio nada, repite con `THRESHOLD=` (ver [XYZCAL_MAGNETS](#xyzcal_magnets-faulty_region-de-bed_mesh)).
+5. **Escala del eje Z** (opcional; necesitas un bloque de acero de espesor conocido). Coloca el bloque con el PINDA centrado encima:
+   ```gcode
+   G28
+   XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105
+   ```
+   Lee el factor `k` y la incertidumbre. Si la desviación está dentro del error de medida, no cambies nada.
+
+### Parte 3: calibración XYZ (SIN lámina, cama fría)
+
+6. **Quita la lámina** y comprueba a ojo (con la mano en el paro de emergencia en el `G28`) que el PINDA (no la boquilla) queda sobre cada círculo:
+   ```gcode
+   G28
+   XYZCAL_GOTO POINT=1
+   XYZCAL_GOTO POINT=2
+   XYZCAL_GOTO POINT=3
+   XYZCAL_GOTO POINT=4
+   ```
+   Si no está sobre el círculo, ajusta `first_point_x/y` en `[prusa_xyzcal]` y reinicia. Un error de pocos mm lo corrige la búsqueda gruesa; más de ~4 mm hay que ajustarlo.
+7. **Altura de activación.** Baja `Z_FLOOR` poco a poco, vigilando, hasta que el PINDA se active:
+   ```gcode
+   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.5
+   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.0
+   XYZCAL_ZTEST POINT=1 Z_FLOOR=0.5
+   ```
+   Con `G28` sobre el círculo debe dar una Z cercana a tu `z_offset`. Pon en `[prusa_xyzcal]` un `z_floor` unas décimas por debajo de esa Z.
+8. **Medir un círculo** (dispersión de pocas centésimas de mm; repítelo para ver que se repite):
+   ```gcode
+   XYZCAL_POINT POINT=1
+   XYZCAL_POINT POINT=1
+   ```
+9. **Centros exactos** (opcional, recomendado). Con la máquina ya caliente, haz el homing doble justo antes:
+   ```gcode
+   G28
+   G28
+   XYZCAL_LOCATE REPEAT=3
+   ```
+   Pega en `printer.cfg` el bloque que imprime (`home_xy_position`, `points` de `[z_tilt]` y `point1..point4`), deja `dot_spacing_x/y` en 208 / 192 y haz `FIRMWARE_RESTART`. A partir de ahí puedes usar `COARSE=0`.
+10. **Calibración de los 4 círculos** (informe sin cambiar nada):
+    ```gcode
+    G28
+    XYZCAL_CALIBRATE COARSE=0
+    ```
+    Si no has hecho el paso 9, usa `XYZCAL_CALIBRATE` sin parámetros. Cómo leer el informe: [XYZCAL_CALIBRATE](#xyzcal_calibrate-cómo-leer-el-informe).
+11. **Aplicar el skew** (solo si el informe es razonable y no has reiniciado Klipper desde el paso 10):
+    ```gcode
+    XYZCAL_APPLY SAVE=pinda_skew
+    SAVE_CONFIG
+    ```
+    Tras el reinicio que hace `SAVE_CONFIG`, comprueba el perfil:
+    ```gcode
+    SKEW_PROFILE LOAD=pinda_skew
+    GET_CURRENT_SKEW
+    ```
+    Y añade `SKEW_PROFILE LOAD=pinda_skew` a tu `PRINT_START`.
+
+### Parte 4: volver a poner la lámina
+
+12. **Pon la lámina** y haz `G28`. Con lámina, homear en el círculo en vez del centro puede mover el cero unas décimas: revisa la primera capa o repite `PROBE_CALIBRATE` y `SAVE_CONFIG`.
+13. **Homing doble** (opcional): crea la macro `HOME_DOBLE` de [Varios golpes de homing](#varios-golpes-de-homing) y llámala al principio de `PRINT_START` en lugar de `G28`.
+14. **Escala de X e Y** (opcional): imprime un cuadrado de 100 mm, mídelo con calibre y calcula `nuevo = actual × (medido / 100)`. Si coincide con el `rotation_distance` que sugirió el informe del paso 10, cámbialo en `[stepper_x]` y `[stepper_y]`, haz `FIRMWARE_RESTART` y repite la comprobación. El módulo nunca modifica el `rotation_distance`.
+15. **Prueba final:** imprime una pieza de calibración cuadrada y mide. Si todo está bien, no necesitas repetir el ajuste hasta que cambies algo mecánico (correas, ejes, cama) o notes piezas torcidas.
+
+### Resumen de todos los comandos, en orden
+
+```gcode
+# Parte 1 y 2 (con lámina)
+XYZCAL_GOTO                                   # debe decir "missing POINT"
+G28
+XYZCAL_LIMITS AXES=X OVERRUN=5
+XYZCAL_LIMITS AXES=Y OVERRUN=5
+XYZCAL_MAGNETS STEP=8
+XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105
+
+# Parte 3 (sin lámina)
+G28
+XYZCAL_GOTO POINT=1                           # ... hasta POINT=4
+XYZCAL_ZTEST POINT=1 Z_FLOOR=1.0
+XYZCAL_POINT POINT=1
+G28
+G28
+XYZCAL_LOCATE REPEAT=3
+XYZCAL_CALIBRATE COARSE=0
+XYZCAL_APPLY SAVE=pinda_skew
+SAVE_CONFIG
+
+# Parte 4 (con lámina)
+SKEW_PROFILE LOAD=pinda_skew
+GET_CURRENT_SKEW
+```
+
+## Ejemplos de uso
+
+Todos los parámetros entre corchetes son opcionales. Los valores de ejemplo son de una MK3 con el PINDA desplazado (23, 5).
+
+### Posicionar y comprobar
+
+```gcode
+XYZCAL_GOTO POINT=2                  # lleva el PINDA al punto 2 con Z=5 mm
+XYZCAL_GOTO POINT=1 Z=10             # lo mismo, a 10 mm de altura
+XYZCAL_ZTEST POINT=1                 # a qué Z se activa el PINDA en el punto 1
+XYZCAL_ZTEST POINT=3 Z_FLOOR=0.5     # límite de bajada solo para esta prueba
+XYZCAL_ZTEST POINT=1 Z_START=4 Z_FLOOR=1.0
+```
+
+### Medir
+
+```gcode
+XYZCAL_POINT POINT=1                 # un círculo, con búsqueda gruesa inicial
+XYZCAL_POINT POINT=4 COARSE=0        # sin búsqueda gruesa (posición ya buena)
+XYZCAL_CALIBRATE                     # los 4 círculos, informe completo
+XYZCAL_CALIBRATE COARSE=0            # más rápido si point1..point4 están ajustados
+XYZCAL_CALIBRATE APPLY=1 SAVE=pinda_skew   # mide y aplica de una vez
+XYZCAL_APPLY SAVE=pinda_skew         # aplica la última medida y guarda el perfil
+XYZCAL_APPLY                         # aplica sin guardar perfil
+```
+
+`XYZCAL_APPLY` usa la última medida de `XYZCAL_CALIBRATE`: si reinicias Klipper entre una y otra, hay que volver a medir. Para que el perfil sea permanente hace falta `SAVE_CONFIG`.
+
+### Localizar los círculos
+
+```gcode
+XYZCAL_LOCATE                        # 4 círculos, 2 rondas con G28 X Y entre medias
+XYZCAL_LOCATE REPEAT=3               # 3 rondas (más fiable)
+XYZCAL_LOCATE POINTS=1,2 REPEAT=3    # solo los dos círculos frontales (G28 y z_tilt)
+XYZCAL_LOCATE REPEAT=1 COARSE=0      # una sola pasada, partiendo de point1..point4
+XYZCAL_LOCATE REPEAT=3 REHOME=0      # sin G28 entre rondas (mide solo el escaneo)
+```
+
+### Mapa de imanes
+
+```gcode
+XYZCAL_MAGNETS                                   # área de [bed_mesh], paso de 8 mm
+XYZCAL_MAGNETS STEP=5 THRESHOLD=0.03             # más fino y más sensible
+XYZCAL_MAGNETS STEP=12 MARGIN=3                  # rápido y con más holgura
+XYZCAL_MAGNETS X_MIN=35 X_MAX=140 Y_MIN=6 Y_MAX=100   # solo una zona de la cama
+XYZCAL_MAGNETS CSV=/home/pi/printer_data/config/imanes.csv   # guarda los datos
+```
+
+### Escala del eje Z
+
+```gcode
+XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105          # bloque de 20 mm, dos referencias a ±40 mm
+XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105 REPEAT=5 # más rondas, menos incertidumbre
+XYZCAL_ZSCALE THICKNESS=20 REF_THICKNESS=10 BLOCK_X=100 BLOCK_Y=105   # referencias sobre bloques de 10 mm
+XYZCAL_ZSCALE THICKNESS=10 BLOCK_X=100 BLOCK_Y=105 SINGLE=1 # una sola referencia
+XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105 REF_X1=60 REF_Y1=105 REF_X2=140 REF_Y2=105
+```
+
+Con `REF_THICKNESS` distinto de 0, los bloques de referencia (de ese espesor y del mismo material) deben estar bajo la sonda en las posiciones de referencia.
+
+### Tope máximo de X/Y
+
+```gcode
+XYZCAL_LIMITS AXES=X OVERRUN=5       # solo X, buscando el tope hasta 5 mm más allá de position_max
+XYZCAL_LIMITS AXES=XY REPEAT=3       # X e Y, 3 repeticiones cada uno
+XYZCAL_LIMITS AXES=Y MARGIN=1.5      # position_max sugerido con 1.5 mm de holgura
+XYZCAL_LIMITS AXES=X SPEED=40        # con otra velocidad (la detección puede fallar)
+```
 
 ## Referencia de comandos
 
