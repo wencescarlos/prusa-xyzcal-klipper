@@ -6,6 +6,9 @@ Calibración XYZ al estilo de la **Prusa MK3** para **Klipper**: el sensor PINDA
 
 > **Importante.** Es un módulo de la comunidad, sin relación con Prusa Research ni con el proyecto Klipper. Mueve el cabezal y baja Z hasta tocar la cama: léete la sección [Seguridad](#seguridad) antes de ejecutar nada.
 
+> [!WARNING]
+> **Uso bajo tu propia responsabilidad.** Este software se ofrece "tal cual", sin ninguna garantía. Solo se ha probado en una impresora concreta (ver [Estado de las pruebas](#estado-de-las-pruebas)); en otras máquinas, configuraciones o versiones de Klipper puede comportarse de forma distinta. Si lo instalas y lo usas en tu impresora, lo haces bajo tu exclusiva responsabilidad: el autor no se hace responsable de daños en la impresora, la cama, la boquilla, el sensor u otros componentes, ni de cualquier otro perjuicio derivado de su uso. Ver [Aviso de responsabilidad](#aviso-de-responsabilidad).
+
 ## Índice
 
 1. [Qué incluye](#qué-incluye)
@@ -21,7 +24,8 @@ Calibración XYZ al estilo de la **Prusa MK3** para **Klipper**: el sensor PINDA
 11. [Cómo funciona y diferencias con Prusa](#cómo-funciona-y-diferencias-con-prusa)
 12. [Pruebas offline](#pruebas-offline)
 13. [Solución de problemas](#solución-de-problemas)
-14. [Licencia y créditos](#licencia-y-créditos)
+14. [Aviso de responsabilidad](#aviso-de-responsabilidad)
+15. [Licencia y créditos](#licencia-y-créditos)
 
 ## Qué incluye
 
@@ -62,6 +66,8 @@ Si algo falla en tu máquina, abre un *issue* con la salida de `XYZCAL_ZTEST` y 
 - Cama MK3 con los 4 círculos de calibración visibles (sin la lámina de acero para la calibración XYZ).
 
 ## Instalación
+
+> Al instalar este repositorio en tu impresora aceptas el [Aviso de responsabilidad](#aviso-de-responsabilidad): lo usas bajo tu propia responsabilidad.
 
 ![Instalación y actualización](docs/img/install_update.png)
 
@@ -465,7 +471,7 @@ Lleva cada eje (con el otro en el centro y Z a 8 mm o más) hacia su tope **máx
 
 ### Parámetros opcionales de `[prusa_xyzcal]`
 
-`iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
+`z_floor` (1.0 si no lo pones; nunca puede quedar por debajo del `position_min` de `[stepper_z]`), `iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
 
 ### Varios golpes de homing
 
@@ -497,9 +503,10 @@ Sin impresora, desde la raíz del repositorio:
 python3 tests/test_simulacion.py
 # opcional: con el skew_correction real de Klipper
 python3 tests/test_simulacion.py ~/klipper/klippy/extras/skew_correction.py
+python3 tests/test_klipper.py
 ```
 
-Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala, imanes y bloque de acero. Debe terminar con `RESULTADO: TODO CORRECTO`.
+`test_simulacion.py` simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala, imanes y bloque de acero. `test_klipper.py` ejecuta los comandos `XYZCAL_*` sobre imitaciones de los objetos de Klipper y comprueba sobre todo los fallos: que la boquilla vuelve a `z_start`, que no se mide fuera del recorrido y que `XYZCAL_LIMITS` deja los límites como estaban. Los dos deben terminar con `RESULTADO: TODO CORRECTO`.
 
 ## Solución de problemas
 
@@ -507,6 +514,8 @@ Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala,
 |---|---|
 | `Unknown command: XYZCAL_...` | El módulo no cargó. Comprueba el enlace en `~/klipper/klippy/extras/prusa_xyzcal.py`, que `[prusa_xyzcal]` está en la configuración y reinicia con `FIRMWARE_RESTART`. |
 | `Haz G28 antes de calibrar` | Todos los comandos exigen X, Y y Z homeados. |
+| `z_floor (...) está por debajo del position_min de Z` | Sube `z_floor` en `[prusa_xyzcal]` (o pasa `Z_FLOOR=`), o baja `position_min` de `[stepper_z]` si de verdad necesitas bajar más. |
+| `Movimiento fuera del recorrido de la máquina` | Un punto (`first_point_*`, `dot_spacing_*` o `pointN`) o una Z queda fuera de los límites. Antes se recortaba sin avisar y se medía en otro sitio. |
 | `No se detecta el punto cerca de (...)` | El PINDA no se activó. ¿Quitaste la lámina? Revisa `z_floor` y la posición con `XYZCAL_GOTO`. |
 | `No se encuentra el borde X del punto` | El sensor sigue activo a 16 mm del centro. El módulo ya reintenta subiendo la altura de barrido; si persiste, usa `COARSE=1` o revisa la posición. |
 | `El sensor ya está activado a Z=3.00` | Hay metal debajo o la cama está caliente. Usa la cama fría y revisa `z_start`. |
@@ -514,10 +523,22 @@ Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala,
 | `Endstop stepper_x still triggered after retract` | `homing_retract_dist` distinto de 0 con sensorless. Déjalo en 0 y usa una macro con dos `G28`. |
 | La dispersión de `XYZCAL_LOCATE` es grande en la ronda 1 | El primer homing en frío no coincide con los siguientes. Repite con la máquina caliente. |
 
+## Aviso de responsabilidad
+
+Al instalar y usar este módulo aceptas que:
+
+- Lo haces **bajo tu propia responsabilidad**. El software se distribuye "tal cual", sin garantía de ningún tipo, ni expresa ni implícita, incluida la de funcionamiento correcto o idoneidad para un fin concreto (ver las secciones 15 y 16 de la licencia GPLv3 en `LICENSE`).
+- Solo se ha probado en la máquina descrita en [Estado de las pruebas](#estado-de-las-pruebas). Que funcione allí no garantiza que funcione en tu impresora: otras placas, drivers, sondas, cinemáticas, firmwares o versiones de Klipper pueden dar resultados distintos o movimientos inesperados.
+- El módulo mueve el cabezal, baja Z cerca de la cama y, con `XYZCAL_LIMITS`, lleva los ejes contra su tope mecánico. Una configuración incorrecta puede provocar choques. Vigila siempre la impresora mientras se ejecuta y ten a mano la parada de emergencia (`M112`).
+- El autor y los colaboradores **no se hacen responsables** de daños en la impresora o sus componentes (cama, lámina, boquilla, sensor, correas, motores, electrónica), de piezas mal impresas ni de cualquier otro perjuicio, directo o indirecto, derivado de instalar o usar este software.
+- Revisa los valores que propone el módulo (`xy_skew`, `rotation_distance`, `faulty_region`, `position_max`...) antes de aplicarlos a tu configuración.
+
+Si no estás de acuerdo con estas condiciones, no instales ni uses este módulo.
+
 ## Licencia y créditos
 
 GNU GPLv3 (ver `LICENSE`), la misma que Klipper y el firmware de Prusa del que se toma el algoritmo.
 
 - Algoritmo de calibración tomado de [Prusa-Firmware](https://github.com/prusa3d/Prusa-Firmware) (`mesh_bed_calibration.cpp`).
-- Se integra con [Klipper](https://github.com/Klipper3d/klipper) mediante un módulo `extras` y su API pública.
+- Se integra con [Klipper](https://github.com/Klipper3d/klipper) mediante un módulo `extras`. Usa algunas funciones internas de Klipper (`_update_skew` de `skew_correction`, los límites de la cinemática y `HomingMove`); si una actualización las cambia, el comando afectado da un error claro en vez de fallar a medias.
 - No está afiliado ni respaldado por Prusa Research ni por el proyecto Klipper.
