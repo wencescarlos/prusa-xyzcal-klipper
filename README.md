@@ -465,7 +465,7 @@ Lleva cada eje (con el otro en el centro y Z a 8 mm o más) hacia su tope **máx
 
 ### Parámetros opcionales de `[prusa_xyzcal]`
 
-`iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
+`z_floor` (1.0 si no lo pones; nunca puede quedar por debajo del `position_min` de `[stepper_z]`), `iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
 
 ### Varios golpes de homing
 
@@ -497,9 +497,10 @@ Sin impresora, desde la raíz del repositorio:
 python3 tests/test_simulacion.py
 # opcional: con el skew_correction real de Klipper
 python3 tests/test_simulacion.py ~/klipper/klippy/extras/skew_correction.py
+python3 tests/test_klipper.py
 ```
 
-Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala, imanes y bloque de acero. Debe terminar con `RESULTADO: TODO CORRECTO`.
+`test_simulacion.py` simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala, imanes y bloque de acero. `test_klipper.py` ejecuta los comandos `XYZCAL_*` sobre imitaciones de los objetos de Klipper y comprueba sobre todo los fallos: que la boquilla vuelve a `z_start`, que no se mide fuera del recorrido y que `XYZCAL_LIMITS` deja los límites como estaban. Los dos deben terminar con `RESULTADO: TODO CORRECTO`.
 
 ## Solución de problemas
 
@@ -507,6 +508,8 @@ Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala,
 |---|---|
 | `Unknown command: XYZCAL_...` | El módulo no cargó. Comprueba el enlace en `~/klipper/klippy/extras/prusa_xyzcal.py`, que `[prusa_xyzcal]` está en la configuración y reinicia con `FIRMWARE_RESTART`. |
 | `Haz G28 antes de calibrar` | Todos los comandos exigen X, Y y Z homeados. |
+| `z_floor (...) está por debajo del position_min de Z` | Sube `z_floor` en `[prusa_xyzcal]` (o pasa `Z_FLOOR=`), o baja `position_min` de `[stepper_z]` si de verdad necesitas bajar más. |
+| `Movimiento fuera del recorrido de la máquina` | Un punto (`first_point_*`, `dot_spacing_*` o `pointN`) o una Z queda fuera de los límites. Antes se recortaba sin avisar y se medía en otro sitio. |
 | `No se detecta el punto cerca de (...)` | El PINDA no se activó. ¿Quitaste la lámina? Revisa `z_floor` y la posición con `XYZCAL_GOTO`. |
 | `No se encuentra el borde X del punto` | El sensor sigue activo a 16 mm del centro. El módulo ya reintenta subiendo la altura de barrido; si persiste, usa `COARSE=1` o revisa la posición. |
 | `El sensor ya está activado a Z=3.00` | Hay metal debajo o la cama está caliente. Usa la cama fría y revisa `z_start`. |
@@ -519,5 +522,5 @@ Simula una cama MK3 con un PINDA con histéresis y ruido, ejes torcidos, escala,
 GNU GPLv3 (ver `LICENSE`), la misma que Klipper y el firmware de Prusa del que se toma el algoritmo.
 
 - Algoritmo de calibración tomado de [Prusa-Firmware](https://github.com/prusa3d/Prusa-Firmware) (`mesh_bed_calibration.cpp`).
-- Se integra con [Klipper](https://github.com/Klipper3d/klipper) mediante un módulo `extras` y su API pública.
+- Se integra con [Klipper](https://github.com/Klipper3d/klipper) mediante un módulo `extras`. Usa algunas funciones internas de Klipper (`_update_skew` de `skew_correction`, los límites de la cinemática y `HomingMove`); si una actualización las cambia, el comando afectado da un error claro en vez de fallar a medias.
 - No está afiliado ni respaldado por Prusa Research ni por el proyecto Klipper.

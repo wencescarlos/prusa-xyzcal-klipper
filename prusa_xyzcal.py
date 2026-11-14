@@ -15,8 +15,9 @@
 # Diferencia con el firmware original: Prusa para el movimiento en cuanto el
 # PINDA cambia de estado (parada por hardware). Aquí se hace por sondeo: se
 # mueve en pasos pequeños, se consulta el sensor (como QUERY_PROBE) y se
-# afina el borde por bisección. Es más lento pero usa solo la API pública de
-# Klipper y no toca la configuración del endstop.
+# afina el borde por bisección. Es más lento pero no toca la configuración
+# del endstop. (XYZCAL_APPLY y XYZCAL_LIMITS sí usan funciones internas de
+# Klipper; si faltan, dan un error claro.)
 #
 # Comandos: XYZCAL_GOTO, XYZCAL_ZTEST, XYZCAL_POINT, XYZCAL_CALIBRATE,
 # XYZCAL_APPLY, XYZCAL_LOCATE, XYZCAL_MAGNETS, XYZCAL_ZSCALE, XYZCAL_LIMITS.
@@ -532,10 +533,14 @@ def fit_surface(pts, deg=3, k=4.0, min_thr=0.04, fixed_thr=None, iters=12):
             if _ == 0:
                 sigma = 1.4826 * med
             else:
-                sigma = math.sqrt(sum(e * e for e in used) / len(used))
+                sigma = math.sqrt(sum(e * e for e in used) / max(len(used), 1))
             thr = max(min_thr, k * sigma)
         new = [abs(e) <= thr for e in resid]
         if new == inl:
+            break
+        if sum(new) < 3 * len(terms):
+            # quedarían muy pocos puntos "normales" para ajustar: se para
+            # aquí y se conservan las marcas de la iteración anterior
             break
         inl = new
     return {'resid': resid, 'flag': [not ok for ok in inl],
@@ -754,13 +759,32 @@ class KlipperIO:
     def limits(self):
         return (self._mn.x, self._mx.x, self._mn.y, self._mx.y)
 
+    def z_limits(self):
+        return (self._mn.z, self._mx.z)
+
     def move(self, x=None, y=None, z=None, speed=None):
+        """Mueve la boquilla. Si una coordenada queda fuera del recorrido
+        de la máquina da error en vez de recortarla en silencio (se mediría
+        en otro sitio sin avisar). Solo se tolera un error de redondeo."""
         xmin, xmax, ymin, ymax = self.limits()
-        if x is not None:
-            x = min(max(x, xmin), xmax)
-        if y is not None:
-            y = min(max(y, ymin), ymax)
-        self.toolhead.manual_move([x, y, z], speed or self.xy_speed)
+        zmin, zmax = self.z_limits()
+        out = []
+        for name, v, lo, hi in (('X', x, xmin, xmax), ('Y', y, ymin, ymax),
+                                ('Z', z, zmin, zmax)):
+            if v is None:
+                out.append(None)
+                continue
+            if not (lo - 1e-3 <= v <= hi + 1e-3):
+                raise XYZCalError(
+                    "Movimiento fuera del recorrido de la máquina: %s=%.3f "
+                    "(límites %.2f..%.2f). Revisa la posición del punto, "
+                    "z_start/z_floor o position_min/position_max."
+                    % (name, v, lo, hi))
+            out.append(min(max(v, lo), hi))
+        self.toolhead.manual_move(out, speed or self.xy_speed)
+
+    def z(self):
+        return self.toolhead.get_position()[2]
 
     def triggered(self):
         votes = 0
@@ -784,7 +808,9 @@ class PrusaXYZCal:
         self.settle = config.getfloat('settle_time', 0.02, minval=0.)
         self.defaults = dict(
             z_start=config.getfloat('z_start', 3.0),
-            z_floor=config.getfloat('z_floor', -0.4),
+            # 1.0 coincide con el ejemplo de config y el README; un valor
+            # negativo solo tiene sentido tras comprobarlo con XYZCAL_ZTEST
+            z_floor=config.getfloat('z_floor', 1.0),
             z_coarse=config.getfloat('z_coarse_step', 0.25, above=0.02),
             scan_lower=config.getfloat('scan_lower', 0.1, minval=0.),
             edge_span=config.getfloat('edge_span', 16.0, above=1.),
@@ -804,12 +830,13 @@ class PrusaXYZCal:
             v = config.getfloatlist('point%d' % n, None, count=2)
             if v is not None:
                 self.overrides[n - 1] = (v[0], v[1])
-        try:
+        # Respaldo por si el objeto probe no ofrece get_offsets(); el valor
+        # bueno se pide al objeto en cada comando (_probe_offsets)
+        self.probe_off = None
+        if config.has_section('probe'):
             psec = config.getsection('probe')
-            self.probe_off = (psec.getfloat('x_offset', 0.),
-                              psec.getfloat('y_offset', 0.))
-        except Exception:
-            self.probe_off = (0., 0.)
+            self.probe_off = (psec.getfloat('x_offset', 0., note_valid=False),
+                              psec.getfloat('y_offset', 0., note_valid=False))
         self.last_report = None
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command('XYZCAL_GOTO', self.cmd_GOTO,
@@ -854,22 +881,56 @@ class PrusaXYZCal:
             raise gcmd.error("No encuentro [probe] con query_endstop")
         return q
 
-    def _params(self, gcmd):
-        kw = dict(self.defaults)
-        for key, name in (('z_start', 'Z_START'), ('z_floor', 'Z_FLOOR')):
-            kw[key] = gcmd.get_float(name, kw[key])
+    def _probe_offsets(self, gcmd):
+        """(x_offset, y_offset) de la sonda: posición de sonda = boquilla
+        + offset. Se piden al objeto probe (vale para [probe], [bltouch],
+        etc.); si no se puede, se usa lo leído de [probe] en la config."""
+        probe = self.printer.lookup_object('probe', None)
+        get = getattr(probe, 'get_offsets', None)
+        if get is not None:
+            try:
+                off = get()
+            except TypeError:
+                off = get(gcmd)
+            return (off[0], off[1])
+        if self.probe_off is not None:
+            return self.probe_off
+        raise gcmd.error("No puedo leer x_offset/y_offset de la sonda")
+
+    def _params(self, gcmd, kw=None):
+        if kw is None:
+            kw = dict(self.defaults)
+            for key, name in (('z_start', 'Z_START'), ('z_floor', 'Z_FLOOR')):
+                kw[key] = gcmd.get_float(name, kw[key])
         if kw['z_floor'] >= kw['z_start']:
             raise gcmd.error("Z_FLOOR debe ser menor que Z_START")
         return ScanParams(**kw)
 
-    def _make(self, gcmd):
+    def _check_z(self, gcmd, io, params):
+        """Comprueba antes de mover que z_floor y z_start caben en el
+        recorrido de Z (si no, Klipper cortaría a mitad de una medida)."""
+        zmin, zmax = io.z_limits()
+        if params.z_floor < zmin:
+            raise gcmd.error("z_floor (%.2f) está por debajo del position_min "
+                             "de Z (%.2f). Sube z_floor o usa Z_FLOOR="
+                             % (params.z_floor, zmin))
+        if params.z_start > zmax:
+            raise gcmd.error("z_start (%.2f) supera el position_max de Z "
+                             "(%.2f)" % (params.z_start, zmax))
+
+    def _make(self, gcmd, kw=None):
         io = KlipperIO(self.printer, self._query_func(gcmd), self.reads,
                        self.settle)
-        return io, Scanner(io, self._params(gcmd), log=gcmd.respond_info)
+        params = self._params(gcmd, kw)
+        self._check_z(gcmd, io, params)
+        return io, Scanner(io, params, log=gcmd.respond_info)
 
     def _finish(self, io, params):
+        """Deja la boquilla a z_start (solo sube, nunca baja) y sincroniza
+        la posición de G-code. Se llama siempre, también tras un error."""
         try:
-            io.move(z=params.z_start, speed=params.z_speed)
+            if io.z() < params.z_start:
+                io.move(z=params.z_start, speed=params.z_speed)
         except Exception:
             pass
         gcode_move = self.printer.lookup_object('gcode_move')
@@ -882,16 +943,22 @@ class PrusaXYZCal:
     def cmd_GOTO(self, gcmd):
         idx = self._point_index(gcmd)
         z = gcmd.get_float('Z', 5.0)
-        io, sc = self._make(gcmd)
+        # no hace falta la sonda: solo se mueve
+        io = KlipperIO(self.printer, lambda t: False, 1, 0.)
+        p = self._params(gcmd)
         x, y = self._nominal(idx)
-        io.move(z=max(z, sc.p.z_start), speed=sc.p.z_speed)
-        io.move(x=x, y=y, speed=sc.p.travel_speed)
-        io.move(z=z, speed=sc.p.z_speed)
+        try:
+            io.move(z=max(z, p.z_start), speed=p.z_speed)
+            io.move(x=x, y=y, speed=p.travel_speed)
+            io.move(z=z, speed=p.z_speed)
+        except XYZCalError as e:
+            raise gcmd.error(str(e))
+        finally:
+            self.printer.lookup_object('gcode_move').reset_last_position()
         gcmd.respond_info("Punto %d: boquilla en X=%.2f Y=%.2f Z=%.2f. El "
                           "PINDA queda desplazado de la boquilla según "
                           "x_offset/y_offset de [probe] y debe quedar sobre "
                           "el círculo de la cama." % (idx + 1, x, y, z))
-        self.printer.lookup_object('gcode_move').reset_last_position()
 
     cmd_ZTEST_help = ("Baja en la posición nominal y dice a qué Z se activa "
                       "el PINDA (POINT=1..4 [Z_START=3 Z_FLOOR=-0.4])")
@@ -902,6 +969,8 @@ class PrusaXYZCal:
         x, y = self._nominal(idx)
         try:
             z = sc.z_hit(x, y)
+        except XYZCalError as e:
+            raise gcmd.error(str(e))
         finally:
             self._finish(io, sc.p)
         if z is None:
@@ -922,9 +991,9 @@ class PrusaXYZCal:
         try:
             res = sc.scan_dot(x, y, coarse)
         except XYZCalError as e:
-            self._finish(io, sc.p)
             raise gcmd.error(str(e))
-        self._finish(io, sc.p)
+        finally:
+            self._finish(io, sc.p)
         gcmd.respond_info("Punto %d: X=%.3f Y=%.3f (nominal %.1f, %.1f) "
                           "dispersión %.3f mm" % (idx + 1, res['x'], res['y'],
                                                   x, y, res['spread']))
@@ -981,9 +1050,9 @@ class PrusaXYZCal:
                     this.append(res)
                 rounds.append(this)
         except XYZCalError as e:
-            self._finish(io, sc.p)
             raise gcmd.error("Punto %d: %s" % (i + 1, e))
-        self._finish(io, sc.p)
+        finally:
+            self._finish(io, sc.p)
         stats = locate_stats(rounds)
         gcmd.respond_info("\n".join(
             self._locate_lines(idxs, stats, repeat, rehome)))
@@ -1059,6 +1128,11 @@ class PrusaXYZCal:
         if not rails or len(rails) < 2:
             raise gcmd.error("XYZCAL_LIMITS solo funciona con cinemática "
                              "cartesiana")
+        lim = getattr(kin, 'limits', None)
+        if lim is None:
+            raise gcmd.error("Esta versión de Klipper no expone los límites "
+                             "de la cinemática (kin.limits): no puedo medir "
+                             "el tope con seguridad")
         phoming = self.printer.lookup_object('homing')
         import sys
         HomingMove = getattr(sys.modules.get(type(phoming).__module__),
@@ -1090,14 +1164,16 @@ class PrusaXYZCal:
                     gcmd.respond_info("%s: hacia el tope máximo a %.0f mm/s "
                                       "(hasta %.1f)" % (ax, speed, pos[idx]))
                     # amplía solo el límite de este eje para poder rebasar
-                    # position_max; el G28 posterior lo restablece
-                    lim = getattr(kin, 'limits', None)
-                    if lim is None:
-                        raise gcmd.error("La cinemática no expone 'limits'")
+                    # position_max y lo restaura en cuanto acaba el
+                    # movimiento, pase lo que pase (no depende del G28)
+                    orig = lim[idx]
                     lim[idx] = (pmin, pmax + overrun + 1.)
-                    hm = HomingMove(self.printer, rail.get_endstops())
-                    trig = hm.homing_move(pos, speed, probe_pos=True,
-                                          check_triggered=True)
+                    try:
+                        hm = HomingMove(self.printer, rail.get_endstops())
+                        trig = hm.homing_move(pos, speed, probe_pos=True,
+                                              check_triggered=True)
+                    finally:
+                        lim[idx] = orig
                     readings.append(trig[idx])
                     gcmd.respond_info("%s: tope en %.3f" % (ax, trig[idx]))
                     gcode.run_script_from_command("G28 %s" % " ".join(axes))
@@ -1161,12 +1237,8 @@ class PrusaXYZCal:
         kw['z_floor'] = gcmd.get_float('Z_FLOOR', kw['z_floor'])
         kw['z_coarse'] = 0.5
         kw['z_bisect_steps'] = 6
-        if kw['z_floor'] >= kw['z_start']:
-            raise gcmd.error("Z_FLOOR debe ser menor que Z_START")
-        io = KlipperIO(self.printer, self._query_func(gcmd), self.reads,
-                       self.settle)
-        sc = Scanner(io, ScanParams(**kw), log=gcmd.respond_info)
-        ox, oy = self.probe_off
+        io, sc = self._make(gcmd, kw)
+        ox, oy = self._probe_offsets(gcmd)
         xmin, xmax, ymin, ymax = io.limits()
         for (x, y) in refs + [(bx, by)]:
             if not (xmin <= x - ox <= xmax and ymin <= y - oy <= ymax):
@@ -1181,9 +1253,9 @@ class PrusaXYZCal:
                                       lambda x, y: (x - ox, y - oy),
                                       log=gcmd.respond_info)
         except XYZCalError as e:
-            self._finish(io, sc.p)
             raise gcmd.error(str(e))
-        self._finish(io, sc.p)
+        finally:
+            self._finish(io, sc.p)
         rds = {}
         for name in ('stepper_z', 'stepper_z1'):
             v = self._rotation_distance(name)
@@ -1271,7 +1343,7 @@ class PrusaXYZCal:
         xs = [x0 + i * (x1 - x0) / (nx - 1) for i in range(nx)]
         ys = [y0 + j * (y1 - y0) / (ny - 1) for j in range(ny)]
         io, sc = self._make(gcmd)
-        ox, oy = self.probe_off
+        ox, oy = self._probe_offsets(gcmd)
         gcmd.respond_info(
             "Mapa de la Z de disparo: %d x %d = %d puntos (sonda X %.1f..%.1f, "
             "Y %.1f..%.1f, paso %.2f x %.2f). Tiempo estimado: ~%.0f min. "
@@ -1282,9 +1354,9 @@ class PrusaXYZCal:
             zmap = magnet_scan(sc, xs, ys, lambda x, y: (x - ox, y - oy),
                                log=gcmd.respond_info)
         except XYZCalError as e:
-            self._finish(io, sc.p)
             raise gcmd.error(str(e))
-        self._finish(io, sc.p)
+        finally:
+            self._finish(io, sc.p)
         try:
             res = magnet_analyze(zmap, xs, ys, thr=thr or None, margin=margin,
                                  min_cells=min_cells)
@@ -1373,9 +1445,9 @@ class PrusaXYZCal:
                                   % (i + 1, x, y))
                 points.append(sc.scan_dot(x, y, coarse))
         except XYZCalError as e:
-            self._finish(io, sc.p)
             raise gcmd.error("Punto %d: %s" % (len(points) + 1, e))
-        self._finish(io, sc.p)
+        finally:
+            self._finish(io, sc.p)
         report = evaluate(points, self.spacing_x, self.spacing_y)
         report['points'] = points
         self.last_report = report
@@ -1387,7 +1459,8 @@ class PrusaXYZCal:
         toolhead = self.printer.lookup_object('toolhead')
         for s in toolhead.get_kinematics().get_steppers():
             if s.get_name() == stepper_name:
-                return s.get_rotation_distance()[0]
+                get = getattr(s, 'get_rotation_distance', None)
+                return get()[0] if get is not None else None
         return None
 
     def _scale_lines(self, r):
@@ -1470,7 +1543,12 @@ class PrusaXYZCal:
         if skew is None:
             raise gcmd.error("Necesitas [skew_correction] en printer.cfg")
         f = report['xy_factor']
-        skew._update_skew(f, skew.xz_factor, skew.yz_factor)
+        update = getattr(skew, '_update_skew', None)
+        if update is None or not hasattr(skew, 'xz_factor'):
+            raise gcmd.error("Esta versión de Klipper no permite aplicar el "
+                             "skew desde el módulo. Pon a mano xy_skew = "
+                             "%.8f en tu perfil de skew_correction." % f)
+        update(f, skew.xz_factor, skew.yz_factor)
         gcmd.respond_info("xy_skew = %.8f aplicado (xz e yz sin cambios)" % f)
         if save_name:
             gcode = self.printer.lookup_object('gcode')
