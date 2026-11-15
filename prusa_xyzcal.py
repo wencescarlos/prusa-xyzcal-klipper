@@ -186,6 +186,17 @@ class ScanParams:
         self.iterations = 3
         self.coarse_step = 2.0
         self.coarse_rounds = 3
+        # Búsqueda gruesa: los puntos vecinos no bajan más de coarse_window
+        # por debajo de la mejor Z de disparo ya medida. Fuera del círculo
+        # (sin lámina) el PINDA apenas se activa y, sin este límite, cada
+        # vecino bajaría hasta z_floor.
+        self.coarse_window = 0.3
+        # Z a la que la boquilla toca la cama SIN lámina (medida con papel).
+        # None = desconocida. Si se conoce, ninguna bajada pasa de
+        # z_contact + min_clearance y el barrido lateral se niega a ir más
+        # bajo (la boquilla arrastraría por la cama).
+        self.z_contact = None
+        self.min_clearance = 0.15
         self.travel_speed = 100.
         self.scan_speed = 30.
         self.z_speed = 10.
@@ -204,9 +215,24 @@ class Scanner:
         self.p = params
         self.log = log or (lambda msg: None)
 
+    # -- límites de seguridad en Z -------------------------------------------
+    def safe_floor(self, floor=None):
+        """Z mínima permitida: z_floor, subida a z_contact + min_clearance si
+        se conoce el contacto, y a 'floor' si se pide un límite más alto."""
+        p = self.p
+        f = p.z_floor
+        if p.z_contact is not None:
+            f = max(f, p.z_contact + p.min_clearance)
+        if floor is not None:
+            f = max(f, floor)
+        return f
+
     # -- altura de primer contacto en (x, y) -------------------------------
-    def z_hit(self, x, y):
+    def z_hit(self, x, y, floor=None):
+        """Z de disparo bajando desde z_start; None si no dispara hasta el
+        límite (safe_floor). 'floor' permite un límite más alto que z_floor."""
         p, io = self.p, self.io
+        z_min = self.safe_floor(floor)
         io.move(z=p.z_start, speed=p.z_speed)
         io.move(x=x, y=y, speed=p.travel_speed)
         if io.triggered():
@@ -216,7 +242,7 @@ class Scanner:
         hi = p.z_start
         lo = None
         z = p.z_start - p.z_coarse
-        while z >= p.z_floor - 1e-9:
+        while z >= z_min - 1e-9:
             io.move(z=z, speed=p.z_speed)
             if io.triggered():
                 lo = z
@@ -224,10 +250,10 @@ class Scanner:
             hi = z
             z -= p.z_coarse
         if lo is None:
-            if hi > p.z_floor + 1e-6:
-                io.move(z=p.z_floor, speed=p.z_speed)
+            if hi > z_min + 1e-6:
+                io.move(z=z_min, speed=p.z_speed)
                 if io.triggered():
-                    lo = p.z_floor
+                    lo = z_min
             if lo is None:
                 io.move(z=p.z_start, speed=p.z_speed)
                 return None
@@ -251,15 +277,20 @@ class Scanner:
         rápido). Si el sensor ya está activo en guess+window, recurre a z_hit.
         Devuelve la Z de disparo, o None si no dispara hasta z_floor."""
         p, io = self.p, self.io
+        z_min = self.safe_floor()
         top = min(guess + window, p.z_start)
         io.move(z=p.z_start, speed=p.z_speed)
         io.move(x=x, y=y, speed=p.travel_speed)
+        if top < z_min:
+            # la Z esperada ya está por debajo del límite seguro
+            io.move(z=p.z_start, speed=p.z_speed)
+            return None
         io.move(z=top, speed=p.z_speed)
         if io.triggered():
             return self.z_hit(x, y)
         hi, lo = top, None
         z = top - step
-        while z >= p.z_floor - 1e-9:
+        while z >= z_min - 1e-9:
             io.move(z=z, speed=p.z_speed)
             if io.triggered():
                 lo = z
@@ -267,10 +298,10 @@ class Scanner:
             hi = z
             z -= step
         if lo is None:
-            if hi > p.z_floor + 1e-6:
-                io.move(z=p.z_floor, speed=p.z_speed)
+            if hi > z_min + 1e-6:
+                io.move(z=z_min, speed=p.z_speed)
                 if io.triggered():
-                    lo = p.z_floor
+                    lo = z_min
             if lo is None:
                 io.move(z=p.z_start, speed=p.z_speed)
                 return None
@@ -291,10 +322,10 @@ class Scanner:
         xmin, xmax, ymin, ymax = self.io.limits()
         cache = {}
 
-        def hit(x, y):
+        def hit(x, y, floor=None):
             key = (round(x, 3), round(y, 3))
             if key not in cache:
-                cache[key] = self.z_hit(x, y)
+                cache[key] = self.z_hit(x, y, floor)
                 self.log("  prueba (%.2f, %.2f): z_hit=%s" % (
                     x, y, "--" if cache[key] is None else "%.3f" % cache[key]))
             return cache[key]
@@ -310,7 +341,12 @@ class Scanner:
                     y = cy + dy * p.coarse_step
                     if not (xmin <= x <= xmax and ymin <= y <= ymax):
                         continue
-                    z = hit(x, y)
+                    # Solo interesa un vecino MÁS ALTO que el mejor: no hace
+                    # falta bajar mucho por debajo de él (fuera del círculo
+                    # bajaría hasta z_floor).
+                    floor = (None if best[2] is None
+                             else best[2] - p.coarse_window)
+                    z = hit(x, y, floor)
                     if z is not None and (best[2] is None or z > best[2] + 0.01):
                         best = (x, y, z)
             if (best[0], best[1]) == (cx, cy):
@@ -386,14 +422,25 @@ class Scanner:
             cx, cy = nx, ny
             if zh is None:
                 raise XYZCalError("Sin respuesta del sensor en (%.1f, %.1f) "
-                                  "hasta Z=%.2f" % (nx, ny, p.z_floor))
-        zs = max(zh - p.scan_lower, p.z_floor)
+                                  "hasta Z=%.2f" % (nx, ny, self.safe_floor()))
+        z_min = self.safe_floor()
+        zs_wanted = zh - p.scan_lower
+        if p.z_contact is not None and zs_wanted < z_min:
+            # El barrido lateral necesita ir por debajo de la Z de disparo;
+            # si eso queda bajo el límite seguro, la boquilla arrastraría
+            # por la cama: mejor parar con un error claro.
+            raise XYZCalError(
+                "Margen insuficiente: el barrido lateral iría a Z=%.3f y la "
+                "boquilla toca la cama a Z=%.3f (mínimo %.2f mm de margen). "
+                "El PINDA está demasiado alto respecto a la boquilla."
+                % (zs_wanted, p.z_contact, p.min_clearance))
+        zs = max(zs_wanted, z_min)
         io.move(x=cx, y=cy, speed=p.travel_speed)
         io.move(z=zs, speed=p.z_speed)
         tries = 0
         while not io.triggered():
             tries += 1
-            if tries > 3 or zs - 0.05 < p.z_floor:
+            if tries > 3 or zs - 0.05 < z_min:
                 raise XYZCalError("El sensor no se activa en el centro del "
                                   "punto a Z=%.2f" % zs)
             zs -= 0.05
@@ -667,7 +714,7 @@ def zscale_measure(sc, refs, block, repeat, to_nozzle, log=None):
                 z = sc.z_hit(nx, ny)
             if z is None:
                 raise XYZCalError("El sensor no dispara en %s (%.1f, %.1f) "
-                                  "hasta Z=%.2f" % (kind, x, y, sc.p.z_floor))
+                                  "hasta Z=%.2f" % (kind, x, y, sc.safe_floor()))
             last[key] = z
             out[kind].append(z)
             if log:
@@ -816,6 +863,12 @@ class PrusaXYZCal:
             edge_span=config.getfloat('edge_span', 16.0, above=1.),
             iterations=config.getint('iterations', 3, minval=1, maxval=10),
             coarse_step=config.getfloat('coarse_step', 2.0, above=0.2),
+            coarse_window=config.getfloat('coarse_window', 0.3, above=0.05),
+            # Z a la que la boquilla toca la cama sin lámina (prueba del
+            # papel). Opcional pero muy recomendable: activa los límites de
+            # seguridad de Scanner.safe_floor y del barrido lateral.
+            z_contact=config.getfloat('nozzle_contact_z', None),
+            min_clearance=config.getfloat('min_clearance', 0.15, minval=0.),
             travel_speed=config.getfloat('travel_speed', 100., above=1.),
             scan_speed=config.getfloat('scan_speed', 30., above=1.),
             z_speed=config.getfloat('z_speed', 10., above=1.),
@@ -823,6 +876,11 @@ class PrusaXYZCal:
         if self.defaults['z_floor'] >= self.defaults['z_start']:
             raise config.error("prusa_xyzcal: z_floor debe ser menor que "
                                "z_start")
+        zc = self.defaults['z_contact']
+        if zc is not None and (zc + self.defaults['min_clearance']
+                               >= self.defaults['z_start']):
+            raise config.error("prusa_xyzcal: nozzle_contact_z + "
+                               "min_clearance debe ser menor que z_start")
         # Posiciones exactas opcionales (salida de XYZCAL_LOCATE): sustituyen
         # a las calculadas con first_point_x/y y dot_spacing_x/y.
         self.overrides = {}
@@ -975,10 +1033,21 @@ class PrusaXYZCal:
             self._finish(io, sc.p)
         if z is None:
             gcmd.respond_info("Sin activación hasta Z=%.2f en (%.1f, %.1f)"
-                              % (sc.p.z_floor, x, y))
+                              % (sc.safe_floor(), x, y))
         else:
-            gcmd.respond_info("El PINDA se activa a Z=%.3f en (%.1f, %.1f)"
-                              % (z, x, y))
+            msg = "El PINDA se activa a Z=%.3f en (%.1f, %.1f)" % (z, x, y)
+            zc = sc.p.z_contact
+            if zc is not None:
+                margin = z - sc.p.scan_lower - zc
+                msg += (". Margen de la boquilla al barrer: %.3f mm (mínimo "
+                        "%.2f)%s" % (margin, sc.p.min_clearance,
+                                     "" if margin >= sc.p.min_clearance
+                                     else " -> INSUFICIENTE: el PINDA está "
+                                     "demasiado alto"))
+            else:
+                msg += (". Aviso: no está configurado nozzle_contact_z; mide "
+                        "con papel a qué Z toca la boquilla sin lámina")
+            gcmd.respond_info(msg)
 
     cmd_POINT_help = ("Mide un solo punto sin calcular nada "
                       "(POINT=1..4 [COARSE=1])")
