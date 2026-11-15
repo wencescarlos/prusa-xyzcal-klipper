@@ -130,7 +130,8 @@ Actualizar Klipper no toca el enlace (es un archivo sin seguimiento). Si algún 
 ## Seguridad
 
 - **Calibración XYZ: quita la lámina de acero.** Prusa hace esta fase sin lámina: los círculos están en la cama calefactora. Con la cama fría.
-- Tu Z=0 se calibró con la lámina puesta; sin ella, la cama queda unas décimas más abajo. `z_floor` es el límite de seguridad: la boquilla no bajará de esa Z. Si el PINDA no se activara, la boquilla quedaría en `z_floor`.
+- `z_floor` es el límite de seguridad: la boquilla no bajará de esa Z. Si el PINDA no se activara, la boquilla quedaría en `z_floor`. **Sin lámina el PINDA apenas detecta fuera de los círculos** (y poco en sus bordes): para activarse tiene que bajar mucho y la boquilla, que va por debajo del PINDA, puede tocar la cama antes. Con `G28` sobre el círculo, Z=0 se mide de nuevo sin lámina, así que el contacto real hay que medirlo (Parte 3, paso 7).
+- **Mide con papel a qué Z toca la boquilla sin lámina** y ponlo en `nozzle_contact_z`. Con ese dato ninguna bajada pasa de `nozzle_contact_z + min_clearance` aunque `z_floor` sea más bajo, y si el PINDA está demasiado alto para barrer los bordes con margen el módulo se detiene con un error en vez de arrastrar la boquilla.
 - **Klipper no limita el descenso del homing de Z.** Con `position_max: 210` puede bajar hasta unos 313 mm; si el PINDA no dispara, la boquilla baja hasta chocar. Por eso la primera vez que homees sobre un círculo: primero `G28 X Y`, luego `G1 X12 Y18 F3000` y comprueba a ojo que el PINDA queda sobre el círculo; haz el primer `G28` completo **con la lámina puesta** y la mano en el paro de emergencia (`M112`).
 - Ten a mano el paro de emergencia las primeras veces y no dejes la impresora sola.
 - `XYZCAL_LIMITS` provoca un choque mecánico en el tope máximo (como el homing en el mínimo, pero en el lado opuesto). Empieza con `OVERRUN=5`.
@@ -149,6 +150,8 @@ dot_spacing_x: 208.0    # separación real de los círculos en la MK3
 dot_spacing_y: 192.0
 z_start: 3.0
 z_floor: 1.0
+nozzle_contact_z: 1.25  # Z a la que la boquilla toca la cama SIN lámina (papel)
+min_clearance: 0.15     # margen mínimo de la boquilla sobre ese contacto
 ```
 
 ### G28 sobre el primer círculo (seguro incluso sin lámina)
@@ -229,32 +232,40 @@ Guía para usar **todas** las opciones del programa, en el orden recomendado. La
    XYZCAL_GOTO POINT=4
    ```
    Si no está sobre el círculo, ajusta `first_point_x/y` en `[prusa_xyzcal]` y reinicia. Un error de pocos mm lo corrige la búsqueda gruesa; más de ~4 mm hay que ajustarlo.
-7. **Altura de activación.** Baja `Z_FLOOR` poco a poco, vigilando, hasta que el PINDA se active:
+7. **Contacto de la boquilla sin lámina (prueba del papel). Antes de cualquier medida.** Con la boquilla limpia (sin restos de plástico), lleva la boquilla sobre el círculo 1 y baja poco a poco con un papel debajo hasta que roce:
    ```gcode
-   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.5
-   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.0
-   XYZCAL_ZTEST POINT=1 Z_FLOOR=0.5
+   G28
+   G90
+   G1 Z3 F600
+   G1 X12 Y18 F3000
+   G1 Z2.0 F300      ; y bajando de 0.1 en 0.1 (luego de 0.05) hasta que el papel roce
    ```
-   Con `G28` sobre el círculo debe dar una Z cercana a tu `z_offset`. Pon en `[prusa_xyzcal]` un `z_floor` unas décimas por debajo de esa Z.
-8. **Medir un círculo** (dispersión de pocas centésimas de mm; repítelo para ver que se repite):
+   Apunta esa Z en `[prusa_xyzcal]` como `nozzle_contact_z` y pon `z_floor` al menos `min_clearance` (0.15) por encima. Reinicia Klipper.
+8. **Altura de activación.** Baja `Z_FLOOR` poco a poco, vigilando, hasta que el PINDA se active (nunca por debajo de `nozzle_contact_z`):
+   ```gcode
+   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.8
+   XYZCAL_ZTEST POINT=1 Z_FLOOR=1.6
+   ```
+   Con `G28` sobre el círculo debe dar una Z cercana a tu `z_offset`. Con `nozzle_contact_z` configurado, el informe dice además el margen que tendrá la boquilla al barrer los bordes (Z de disparo - `scan_lower` - contacto). Si sale **INSUFICIENTE**, el PINDA está demasiado alto respecto a la boquilla: bájalo (en la MK3, a la altura de una brida bajo la boquilla), recalibra `z_offset` con la lámina y repite desde el paso 7.
+9. **Medir un círculo** (dispersión de pocas centésimas de mm; repítelo para ver que se repite):
    ```gcode
    XYZCAL_POINT POINT=1
    XYZCAL_POINT POINT=1
    ```
-9. **Centros exactos** (opcional, recomendado). Con la máquina ya caliente, haz el homing doble justo antes:
+10. **Centros exactos** (opcional, recomendado). Con la máquina ya caliente, haz el homing doble justo antes:
    ```gcode
    G28
    G28
    XYZCAL_LOCATE REPEAT=3
    ```
    Pega en `printer.cfg` el bloque que imprime (`home_xy_position`, `points` de `[z_tilt]` y `point1..point4`), deja `dot_spacing_x/y` en 208 / 192 y haz `FIRMWARE_RESTART`. A partir de ahí puedes usar `COARSE=0`.
-10. **Calibración de los 4 círculos** (informe sin cambiar nada):
+11. **Calibración de los 4 círculos** (informe sin cambiar nada):
     ```gcode
     G28
     XYZCAL_CALIBRATE COARSE=0
     ```
-    Si no has hecho el paso 9, usa `XYZCAL_CALIBRATE` sin parámetros. Cómo leer el informe: [XYZCAL_CALIBRATE](#xyzcal_calibrate-cómo-leer-el-informe).
-11. **Aplicar el skew** (solo si el informe es razonable y no has reiniciado Klipper desde el paso 10):
+    Si no has hecho el paso 10, usa `XYZCAL_CALIBRATE` sin parámetros. Cómo leer el informe: [XYZCAL_CALIBRATE](#xyzcal_calibrate-cómo-leer-el-informe).
+12. **Aplicar el skew** (solo si el informe es razonable y no has reiniciado Klipper desde el paso 11):
     ```gcode
     XYZCAL_APPLY SAVE=pinda_skew
     SAVE_CONFIG
@@ -268,10 +279,10 @@ Guía para usar **todas** las opciones del programa, en el orden recomendado. La
 
 ### Parte 4: volver a poner la lámina
 
-12. **Pon la lámina** y haz `G28`. Con lámina, homear en el círculo en vez del centro puede mover el cero unas décimas: revisa la primera capa o repite `PROBE_CALIBRATE` y `SAVE_CONFIG`.
-13. **Homing doble** (opcional): crea la macro `HOME_DOBLE` de [Varios golpes de homing](#varios-golpes-de-homing) y llámala al principio de `PRINT_START` en lugar de `G28`.
-14. **Escala de X e Y** (opcional): imprime un cuadrado de 100 mm, mídelo con calibre y calcula `nuevo = actual × (medido / 100)`. Si coincide con el `rotation_distance` que sugirió el informe del paso 10, cámbialo en `[stepper_x]` y `[stepper_y]`, haz `FIRMWARE_RESTART` y repite la comprobación. El módulo nunca modifica el `rotation_distance`.
-15. **Prueba final:** imprime una pieza de calibración cuadrada y mide. Si todo está bien, no necesitas repetir el ajuste hasta que cambies algo mecánico (correas, ejes, cama) o notes piezas torcidas.
+13. **Pon la lámina** y haz `G28`. Con lámina, homear en el círculo en vez del centro puede mover el cero unas décimas: revisa la primera capa o repite `PROBE_CALIBRATE` y `SAVE_CONFIG`.
+14. **Homing doble** (opcional): crea la macro `HOME_DOBLE` de [Varios golpes de homing](#varios-golpes-de-homing) y llámala al principio de `PRINT_START` en lugar de `G28`.
+15. **Escala de X e Y** (opcional): imprime un cuadrado de 100 mm, mídelo con calibre y calcula `nuevo = actual × (medido / 100)`. Si coincide con el `rotation_distance` que sugirió el informe del paso 11, cámbialo en `[stepper_x]` y `[stepper_y]`, haz `FIRMWARE_RESTART` y repite la comprobación. El módulo nunca modifica el `rotation_distance`.
+16. **Prueba final:** imprime una pieza de calibración cuadrada y mide. Si todo está bien, no necesitas repetir el ajuste hasta que cambies algo mecánico (correas, ejes, cama) o notes piezas torcidas.
 
 ### Resumen de todos los comandos, en orden
 
@@ -287,7 +298,8 @@ XYZCAL_ZSCALE THICKNESS=20 BLOCK_X=100 BLOCK_Y=105
 # Parte 3 (sin lámina)
 G28
 XYZCAL_GOTO POINT=1                           # ... hasta POINT=4
-XYZCAL_ZTEST POINT=1 Z_FLOOR=1.0
+# prueba del papel -> nozzle_contact_z en [prusa_xyzcal] y FIRMWARE_RESTART
+XYZCAL_ZTEST POINT=1                          # Z de disparo y margen de la boquilla
 XYZCAL_POINT POINT=1
 G28
 G28
@@ -311,7 +323,9 @@ Todos los parámetros entre corchetes son opcionales. Los valores de ejemplo son
 XYZCAL_GOTO POINT=2                  # lleva el PINDA al punto 2 con Z=5 mm
 XYZCAL_GOTO POINT=1 Z=10             # lo mismo, a 10 mm de altura
 XYZCAL_ZTEST POINT=1                 # a qué Z se activa el PINDA en el punto 1
-XYZCAL_ZTEST POINT=3 Z_FLOOR=0.5     # límite de bajada solo para esta prueba
+XYZCAL_ZTEST POINT=3 Z_FLOOR=1.4     # límite de bajada solo para esta prueba
+                                     # (con nozzle_contact_z nunca baja de
+                                     # contacto + min_clearance)
 XYZCAL_ZTEST POINT=1 Z_START=4 Z_FLOOR=1.0
 ```
 
@@ -471,7 +485,7 @@ Lleva cada eje (con el otro en el centro y Z a 8 mm o más) hacia su tope **máx
 
 ### Parámetros opcionales de `[prusa_xyzcal]`
 
-`z_floor` (1.0 si no lo pones; nunca puede quedar por debajo del `position_min` de `[stepper_z]`), `iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
+`z_floor` (1.0 si no lo pones; nunca puede quedar por debajo del `position_min` de `[stepper_z]`), `nozzle_contact_z` (sin valor; Z a la que la boquilla toca la cama sin lámina, medida con papel: ninguna bajada pasa de `nozzle_contact_z + min_clearance`), `min_clearance` (0.15), `coarse_window` (0.3; en la búsqueda gruesa, los puntos vecinos no bajan más de esto por debajo de la mejor Z de disparo medida), `iterations` (3), `scan_lower` (0.1), `edge_span` (16), `coarse_step` (2), `travel_speed`, `scan_speed`, `z_speed`, `sensor_reads` (1; sube a 3 si hay ruido), `settle_time` (0.02), `point1..point4`. Los comandos aceptan `Z_START` y `Z_FLOOR`.
 
 ### Varios golpes de homing
 

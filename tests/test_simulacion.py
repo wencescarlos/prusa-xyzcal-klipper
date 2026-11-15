@@ -41,6 +41,8 @@ class SimIO:
                      (12. + spacing[0], 6. + spacing[1]), (12., 6. + spacing[1])]
         self.moves = 0
         self.queries = 0
+        self.contact = None               # Z a la que la boquilla toca la cama
+        self.z_min_seen = None            # Z más baja alcanzada
         self.zscale = 1.0                 # >1: Z se mueve más de lo mandado
         self.warp = None                  # (amplitud, cx, cy, radio)
         self.bumps = []                   # (x0, y0, x1, y1, dz)
@@ -77,6 +79,11 @@ class SimIO:
         if z is not None:
             if z < -0.5:
                 raise RuntimeError("¡Colisión simulada! z=%.2f" % z)
+            if self.contact is not None and z < self.contact - 1e-9:
+                raise RuntimeError("¡La boquilla toca la cama! z=%.3f "
+                                   "(contacto a %.3f)" % (z, self.contact))
+            if self.z_min_seen is None or z < self.z_min_seen:
+                self.z_min_seen = z
             self.m[2] = z
         self.moves += 1
         self._update()
@@ -149,6 +156,89 @@ def check_with_klipper_skew(io, rep, path):
     cosang0 = (vx[0] * vy[0] + vx[1] * vy[1]) / (math.hypot(*vx) * math.hypot(*vy))
     ang0 = math.degrees(math.acos(cosang0))
     return ang0, ang
+
+
+def prueba_contacto_boquilla():
+    """Cama SIN lámina como en una MK3 real: el PINDA se activa a ~1.6 sobre
+    el círculo, a ~0.7 fuera de él, y la boquilla toca la cama a 1.25.
+    Con z_floor=1.0 la versión anterior bajaba los vecinos de la búsqueda
+    gruesa hasta 1.0 y la boquilla tocaba la cama."""
+    ok = True
+    print("\nSeguridad: boquilla que toca la cama sin lámina (contacto Z=1.25)")
+
+    def sim(contact=1.25):
+        # radio 4.5: en la MK3 real, a ~4.5 mm del centro el PINDA ya solo
+        # se activaba a Z=1.19 (medido), por debajo del contacto
+        io = SimIO(0., 0., (0., 0.), base=0.7, dot_gain=0.9, dot_radius=4.5)
+        io.contact = contact
+        return io
+
+    def scan(io, nominal, **kw):
+        kw.setdefault('z_floor', 1.0)
+        sc = xc.Scanner(io, xc.ScanParams(**kw))
+        try:
+            return sc.scan_dot(nominal[0], nominal[1], coarse=True), None
+        except (xc.XYZCalError, RuntimeError) as e:
+            return None, e
+
+    # 1) comportamiento anterior (sin ventana): la boquilla toca la cama
+    io = sim()
+    res, err = scan(io, (12., 6.), coarse_window=10.)
+    if isinstance(err, RuntimeError) and 'toca' in str(err):
+        print("   sin ventana (como antes): toca la cama, reproducido   OK")
+    else:
+        ok = False
+        print("   FALLO: se esperaba reproducir el contacto: %s" % err)
+
+    # 2) con la ventana de la búsqueda gruesa: no toca y mide el punto
+    io = sim()
+    res, err = scan(io, (12., 6.))
+    if err is None and abs(res['x'] - 12.) < 0.1 and abs(res['y'] - 6.) < 0.1:
+        print("   con coarse_window: punto (%.3f, %.3f), Z mín. %.3f      OK"
+              % (res['x'], res['y'], io.z_min_seen))
+    else:
+        ok = False
+        print("   FALLO con coarse_window: %s %s" % (res, err))
+
+    # 3) nominal desplazado 3 mm (el centro no dispara): con nozzle_contact_z
+    #    el límite seguro evita tocar aunque z_floor sea demasiado bajo
+    io = sim()
+    res, err = scan(io, (15., 6.), z_contact=1.25)
+    if err is None and io.z_min_seen >= 1.25 + 0.15 - 1e-9 and \
+            abs(res['x'] - 12.) < 0.1:
+        print("   con nozzle_contact_z: punto (%.3f, %.3f), Z mín. %.3f  OK"
+              % (res['x'], res['y'], io.z_min_seen))
+    else:
+        ok = False
+        print("   FALLO con nozzle_contact_z: %s %s z_min=%s"
+              % (res, err, io.z_min_seen))
+
+    # 4) PINDA demasiado alto (la boquilla toca a 1.5): error claro y sin
+    #    tocar la cama, en vez de arrastrar la boquilla en el barrido
+    io = sim(contact=1.5)
+    res, err = scan(io, (12., 6.), z_contact=1.5)
+    if isinstance(err, xc.XYZCalError):
+        print("   PINDA demasiado alto: error claro sin tocar             OK")
+        print("      (%s)" % err)
+    else:
+        ok = False
+        print("   FALLO: se esperaba XYZCalError, obtenido %r" % (err,))
+
+    # 5) el margen de seguridad del barrido lateral salta antes de mover
+    io = sim(contact=None)
+    sc = xc.Scanner(io, xc.ScanParams(z_floor=1.0, z_contact=1.45,
+                                      min_clearance=0.15))
+    try:
+        sc.scan_dot(12., 6., coarse=False)
+        ok = False
+        print("   FALLO: el barrido a Z<contacto+margen debía dar error")
+    except xc.XYZCalError as e:
+        if 'Margen insuficiente' in str(e) or 'Sin respuesta' in str(e):
+            print("   barrido bajo el margen de seguridad: rechazado         OK")
+        else:
+            ok = False
+            print("   FALLO: mensaje inesperado: %s" % e)
+    return ok
 
 
 def main():
@@ -401,8 +491,10 @@ def main():
         if abs(rep['k'] - zs_true) > tol:
             ok = False
             print("   FALLO: escala Z incorrecta")
+    if not prueba_contacto_boquilla():
+        ok = False
     # estadística pura
-    fake = [[dict(x=10.0, y=20.0, rx=3., z_hit=1.5, y_ok=True)],
+    fake =[[dict(x=10.0, y=20.0, rx=3., z_hit=1.5, y_ok=True)],
             [dict(x=10.2, y=19.9, rx=3.2, z_hit=1.4, y_ok=True)]]
     st = xc.locate_stats(fake)[0]
     if not (abs(st['x'] - 10.1) < 1e-9 and abs(st['y_spread'] - 0.1) < 1e-9
