@@ -421,6 +421,32 @@ SAVE_CONFIG
 
 Y en tu `PRINT_START`: `SKEW_PROFILE LOAD=pinda_skew`. Solo se actualiza `xy_skew`; el giro de los ejes respecto a la cama no se corrige (no afecta a las dimensiones). El escaneo ignora el skew activo (mueve el cabezal en bruto).
 
+### Resultado desde macros (`printer.prusa_xyzcal`)
+
+Tras `XYZCAL_CALIBRATE`, el resumen de la última medida queda disponible para macros y pantallas, sin tener que leer la consola:
+
+| Campo | Contenido |
+|---|---|
+| `medido` | `False` hasta la primera medida desde que arrancó Klipper |
+| `skew_deg` | Desviación de perpendicularidad X-Y en grados |
+| `xy_skew` | `xy_skew` equivalente para `[skew_correction]` |
+| `verdict` | `perfecto`, `leve` o `extremo` |
+| `bad_points` | Círculos (1-4) con error mayor de lo admisible |
+| `dist_x`, `dist_y` | Separaciones medidas (delante/detrás, derecha/izquierda) |
+| `scale_x`, `scale_y` | Escala de los ejes (`scale_y` es `None` si la Y no es fiable) |
+| `errors` | Error de cada círculo tras el ajuste, en mm |
+
+```ini
+[gcode_macro MOSTRAR_ESCUADRA]
+gcode:
+  {% set r = printer.prusa_xyzcal %}
+  {% if r.medido %}
+    RESPOND MSG="Escuadra: {r.skew_deg} grados ({r.verdict}), xy_skew {r.xy_skew}"
+  {% endif %}
+```
+
+Como en Klipper la plantilla se evalúa antes de ejecutar la macro, léelo en una macro aparte llamada después de `XYZCAL_CALIBRATE`.
+
 ### XYZCAL_LOCATE: localizar con precisión los círculos
 
 ```

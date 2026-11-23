@@ -1,6 +1,7 @@
 # Cambios
 
 ## Sin publicar
+- `get_status`: el resultado de la última `XYZCAL_CALIBRATE` (`skew_deg`, `xy_skew`, `verdict`, `bad_points`, distancias, escalas y error de cada círculo) se puede leer desde macros como `printer.prusa_xyzcal`.
 - **Seguridad sin lámina** (en una MK3 real la boquilla tocó la cama durante `XYZCAL_CALIBRATE` con `z_floor: 1.0`):
   - Búsqueda gruesa: los puntos vecinos ya no bajan hasta `z_floor`; como mucho `coarse_window` (0.3 mm, configurable) por debajo de la mejor Z de disparo medida. Fuera del círculo, sin lámina, el PINDA apenas se activa y antes cada vecino bajaba hasta el límite.
   - Nuevo `nozzle_contact_z` (Z a la que la boquilla toca la cama sin lámina, medida con papel) y `min_clearance` (0.15): ninguna bajada pasa de `nozzle_contact_z + min_clearance`, aunque `z_floor` sea más bajo.
