@@ -295,6 +295,11 @@ def case_calibrate_apply():
     check("CALIBRATE detecta el skew simulado (+-0.01 grados)",
           abs(rep['skew_deg'] - math.degrees(math.radians(-0.15))) < 0.01,
           "%.4f" % rep['skew_deg'])
+    st = env.mod.get_status(0.)
+    check("get_status resume la última medida",
+          st['medido'] and abs(st['skew_deg'] - rep['skew_deg']) < 1e-3
+          and abs(st['xy_skew'] - rep['xy_factor']) < 1e-7
+          and len(st['errors']) == 4, str(st))
     env.run('XYZCAL_APPLY', SAVE='p')
     sk = env.objs['skew_correction']
     check("APPLY aplica xy_skew y guarda el perfil",

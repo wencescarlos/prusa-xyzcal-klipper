@@ -916,6 +916,26 @@ class PrusaXYZCal:
         gcode.register_command('XYZCAL_LIMITS', self.cmd_LIMITS,
                                desc=self.cmd_LIMITS_help)
 
+    def get_status(self, eventtime=None):
+        # Resumen de la última XYZCAL_CALIBRATE para macros y pantallas
+        # (printer.prusa_xyzcal.*). 'medido' es False hasta la primera medida.
+        r = self.last_report
+        if r is None:
+            return {'medido': False}
+        return {
+            'medido': True,
+            'skew_deg': round(r['skew_deg'], 4),
+            'xy_skew': round(r['xy_factor'], 8),
+            'verdict': r['verdict'],
+            'bad_points': [i + 1 for i in r['bad_points']],
+            'dist_x': [round(d, 3) for d in r['dist_x']],
+            'dist_y': [round(d, 3) for d in r['dist_y']],
+            'scale_x': round(r['scale_x'], 5),
+            'scale_y': (None if r['scale_y'] is None
+                        else round(r['scale_y'], 5)),
+            'errors': [round(res[2], 3) for res in r['fit']['residuals']],
+        }
+
     # -- utilidades ---------------------------------------------------------
     def _nominal(self, idx):
         pts = [(self.first_x, self.first_y),
